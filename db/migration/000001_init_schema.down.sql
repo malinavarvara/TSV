@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS api_logs;
+DROP TABLE IF EXISTS reports;
+DROP TABLE IF EXISTS processing_errors;
+DROP TABLE IF EXISTS device_data;
+DROP TABLE IF EXISTS files;
