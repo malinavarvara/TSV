@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: file.sql
 
-package db
+package sqlc
 
 import (
 	"context"
@@ -126,7 +126,7 @@ func (q *Queries) ListFiles(ctx context.Context, arg ListFilesParams) ([]File, e
 		return nil, err
 	}
 	defer rows.Close()
-	var items []File
+	items := []File{}
 	for rows.Next() {
 		var i File
 		if err := rows.Scan(
@@ -170,7 +170,7 @@ func (q *Queries) ListFilesByDateRange(ctx context.Context, arg ListFilesByDateR
 		return nil, err
 	}
 	defer rows.Close()
-	var items []File
+	items := []File{}
 	for rows.Next() {
 		var i File
 		if err := rows.Scan(
@@ -209,7 +209,7 @@ func (q *Queries) ListFilesByStatus(ctx context.Context, status sql.NullString) 
 		return nil, err
 	}
 	defer rows.Close()
-	var items []File
+	items := []File{}
 	for rows.Next() {
 		var i File
 		if err := rows.Scan(

@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: api_log.sql
 
-package db
+package sqlc
 
 import (
 	"context"
@@ -113,7 +113,7 @@ func (q *Queries) GetApiStatistics(ctx context.Context) ([]GetApiStatisticsRow, 
 		return nil, err
 	}
 	defer rows.Close()
-	var items []GetApiStatisticsRow
+	items := []GetApiStatisticsRow{}
 	for rows.Next() {
 		var i GetApiStatisticsRow
 		if err := rows.Scan(
@@ -147,7 +147,7 @@ func (q *Queries) ListApiErrors(ctx context.Context, statusCode sql.NullInt32) (
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ApiLog
+	items := []ApiLog{}
 	for rows.Next() {
 		var i ApiLog
 		if err := rows.Scan(
@@ -189,7 +189,7 @@ func (q *Queries) ListApiLogs(ctx context.Context, arg ListApiLogsParams) ([]Api
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ApiLog
+	items := []ApiLog{}
 	for rows.Next() {
 		var i ApiLog
 		if err := rows.Scan(
@@ -225,7 +225,7 @@ func (q *Queries) ListApiLogsByEndpoint(ctx context.Context, endpoint string) ([
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ApiLog
+	items := []ApiLog{}
 	for rows.Next() {
 		var i ApiLog
 		if err := rows.Scan(
@@ -261,7 +261,7 @@ func (q *Queries) ListApiLogsByUnit(ctx context.Context, unitGuid uuid.NullUUID)
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ApiLog
+	items := []ApiLog{}
 	for rows.Next() {
 		var i ApiLog
 		if err := rows.Scan(
@@ -297,7 +297,7 @@ func (q *Queries) ListSlowRequests(ctx context.Context, responseTimeMs sql.NullI
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ApiLog
+	items := []ApiLog{}
 	for rows.Next() {
 		var i ApiLog
 		if err := rows.Scan(

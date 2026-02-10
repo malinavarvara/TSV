@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: processing_error.sql
 
-package db
+package sqlc
 
 import (
 	"context"
@@ -103,7 +103,7 @@ func (q *Queries) ListProcessingErrorsByFile(ctx context.Context, fileID int64) 
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ProcessingError
+	items := []ProcessingError{}
 	for rows.Next() {
 		var i ProcessingError
 		if err := rows.Scan(
@@ -155,7 +155,7 @@ func (q *Queries) ListProcessingErrorsSummary(ctx context.Context, fileID int64)
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListProcessingErrorsSummaryRow
+	items := []ListProcessingErrorsSummaryRow{}
 	for rows.Next() {
 		var i ListProcessingErrorsSummaryRow
 		if err := rows.Scan(

@@ -1,11 +1,15 @@
-version: "1"
-packages:
-  - name: "db"
-    path: "./db/sqlc"
-    queries: "./db/query/"
-    schema: "./db/migration/"
+# sqlc.yaml (в корне проекта)
+version: "2"
+sql:
+  - schema: "db/migration"
+    queries: "db/query"
     engine: "postgresql"
-    emit_json_tags: true
-    emit_prepared_queries: false
-    emit_interface: false
-    emit_exact_table_names: false
+    gen:
+      go:
+        package: "sqlc"           # Имя пакета
+        out: "db/sqlc"            # Выходная директория
+        emit_json_tags: true
+        emit_prepared_queries: false
+        emit_interface: false
+        emit_exact_table_names: false
+        emit_empty_slices: true

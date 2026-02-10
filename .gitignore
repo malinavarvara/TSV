@@ -1,0 +1,30 @@
+# Служебные папки
+archive/
+incoming/
+logs/
+reports/
+tmp/
+
+# Не коммитить служебные папки внутри cmd/api
+cmd/api/archive/
+cmd/api/incoming/
+cmd/api/logs/
+cmd/api/reports/
+cmd/api/tmp/
+
+# Бинарные файлы
+*.exe
+*.out
+*.so
+*.dll
+
+# IDE файлы
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go файлы
+*.test
+*.prof
+*.log

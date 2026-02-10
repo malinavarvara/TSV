@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: report.sql
 
-package db
+package sqlc
 
 import (
 	"context"
@@ -96,7 +96,7 @@ func (q *Queries) GetReportsByDateRange(ctx context.Context, arg GetReportsByDat
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Report
+	items := []Report{}
 	for rows.Next() {
 		var i Report
 		if err := rows.Scan(
@@ -131,7 +131,7 @@ func (q *Queries) GetReportsByUnit(ctx context.Context, unitGuid uuid.UUID) ([]R
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Report
+	items := []Report{}
 	for rows.Next() {
 		var i Report
 		if err := rows.Scan(
@@ -172,7 +172,7 @@ func (q *Queries) ListRecentReports(ctx context.Context, arg ListRecentReportsPa
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Report
+	items := []Report{}
 	for rows.Next() {
 		var i Report
 		if err := rows.Scan(

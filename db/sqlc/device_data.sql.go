@@ -3,7 +3,7 @@
 //   sqlc v1.30.0
 // source: device_data.sql
 
-package db
+package sqlc
 
 import (
 	"context"
@@ -226,7 +226,7 @@ func (q *Queries) GetDeviceDataByFileID(ctx context.Context, fileID int64) ([]De
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeviceDatum
+	items := []DeviceDatum{}
 	for rows.Next() {
 		var i DeviceDatum
 		if err := rows.Scan(
@@ -342,7 +342,7 @@ func (q *Queries) ListDeviceDataByClass(ctx context.Context, arg ListDeviceDataB
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeviceDatum
+	items := []DeviceDatum{}
 	for rows.Next() {
 		var i DeviceDatum
 		if err := rows.Scan(
@@ -398,7 +398,7 @@ func (q *Queries) ListDeviceDataByUnit(ctx context.Context, arg ListDeviceDataBy
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeviceDatum
+	items := []DeviceDatum{}
 	for rows.Next() {
 		var i DeviceDatum
 		if err := rows.Scan(
@@ -452,7 +452,7 @@ func (q *Queries) SearchDeviceDataText(ctx context.Context, arg SearchDeviceData
 		return nil, err
 	}
 	defer rows.Close()
-	var items []DeviceDatum
+	items := []DeviceDatum{}
 	for rows.Next() {
 		var i DeviceDatum
 		if err := rows.Scan(
