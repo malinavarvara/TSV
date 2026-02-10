@@ -10,6 +10,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
 
@@ -25,6 +26,11 @@ func NewStore(db *sql.DB) *Store {
 		Queries: sqlc.New(db),
 		db:      db,
 	}
+}
+
+// GetDB возвращает подключение к базе данных
+func (s *Store) GetDB() *sql.DB {
+	return s.db
 }
 
 // Connect - подключение к базе данных
@@ -128,4 +134,12 @@ func (s *Store) CheckTablesExist(ctx context.Context) error {
 
 	log.Println("✅ All required tables exist")
 	return nil
+}
+
+// CountDeviceDataByUnit - подсчет количества записей по unit_guid
+func (s *Store) CountDeviceDataByUnit(ctx context.Context, unitGuid uuid.UUID) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM device_data WHERE unit_guid = $1`
+	err := s.db.QueryRowContext(ctx, query, unitGuid).Scan(&count)
+	return count, err
 }
