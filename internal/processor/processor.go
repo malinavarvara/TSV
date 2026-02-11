@@ -4,12 +4,14 @@ import (
 	"TSVProcessingService/db/sqlc"
 	"TSVProcessingService/internal/config"
 	"TSVProcessingService/internal/watcher"
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -174,9 +176,213 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 
 // parseTSVFile парсит TSV файл
 func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []ProcessingError) {
-	// TODO: Реализовать парсинг TSV файла
-	// Временная заглушка
-	return []TSVRow{}, []ProcessingError{}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return []TSVRow{}, []ProcessingError{{
+			LineNumber:   sql.NullInt32{},
+			RawLine:      sql.NullString{},
+			ErrorMessage: fmt.Sprintf("Failed to open file: %v", err),
+			FieldName:    sql.NullString{},
+		}}
+	}
+	defer file.Close()
+
+	var rows []TSVRow
+	var errors []ProcessingError
+
+	// Читаем файл построчно
+	scanner := bufio.NewScanner(file)
+	lineNumber := int32(0)
+	isFirstDataLine := true // Для пропуска заголовков
+
+	for scanner.Scan() {
+		lineNumber++
+		rawLine := scanner.Text()
+
+		// Пропускаем пустые строки и комментарии
+		if strings.TrimSpace(rawLine) == "" || strings.HasPrefix(strings.TrimSpace(rawLine), "#") {
+			continue
+		}
+
+		// Разбиваем строку по табуляции
+		fields := strings.Split(rawLine, "\t")
+
+		// Пропускаем строку заголовков (первая непустая строка после комментариев)
+		if isFirstDataLine {
+			// Проверяем, что это заголовок (содержит названия полей)
+			if strings.Contains(strings.ToLower(rawLine), "n\tmqtt\tinvid") ||
+				strings.Contains(strings.ToLower(rawLine), "номер\tmqtt") {
+				isFirstDataLine = false
+				continue
+			}
+			isFirstDataLine = false
+		}
+
+		// Обрабатываем строку данных
+		row, err := p.parseLine(fields, lineNumber, rawLine)
+		if err != nil {
+			errors = append(errors, ProcessingError{
+				LineNumber:   sql.NullInt32{Int32: lineNumber, Valid: true},
+				RawLine:      sql.NullString{String: rawLine, Valid: true},
+				ErrorMessage: err.Error(),
+				FieldName:    sql.NullString{},
+			})
+			continue
+		}
+
+		rows = append(rows, row)
+	}
+
+	if err := scanner.Err(); err != nil {
+		errors = append(errors, ProcessingError{
+			LineNumber:   sql.NullInt32{},
+			RawLine:      sql.NullString{},
+			ErrorMessage: fmt.Sprintf("Error reading file: %v", err),
+			FieldName:    sql.NullString{},
+		})
+	}
+
+	log.Printf("Parsed %d rows, %d errors from %s", len(rows), len(errors), filepath.Base(filePath))
+	return rows, errors
+}
+
+// parseLine парсит одну строку TSV
+func (p *Processor) parseLine(fields []string, lineNumber int32, rawLine string) (TSVRow, error) {
+	// TSV файл должен содержать минимум 14 полей (в зависимости от формата)
+	// Проверяем минимальное количество полей
+	if len(fields) < 5 { // Минимум: n, mqtt, invid, unit_guid, msg_id
+		return TSVRow{}, fmt.Errorf("insufficient fields: expected at least 5, got %d", len(fields))
+	}
+
+	row := TSVRow{
+		LineNumber: lineNumber,
+	}
+
+	// Парсим каждое поле
+	for i, field := range fields {
+		field = strings.TrimSpace(field)
+
+		// Определяем тип поля по его позиции
+		switch i {
+		case 0: // n (номер) - пропускаем, так как у нас есть lineNumber
+			continue
+		case 1: // mqtt
+			if field != "" {
+				row.Mqtt = sql.NullString{String: field, Valid: true}
+			}
+		case 2: // invid
+			if field != "" {
+				row.Invid = sql.NullString{String: field, Valid: true}
+			}
+		case 3: // unit_guid (самое важное поле!)
+			if field == "" {
+				return TSVRow{}, fmt.Errorf("unit_guid is required")
+			}
+			// Парсим UUID
+			guid, err := uuid.Parse(field)
+			if err != nil {
+				return TSVRow{}, fmt.Errorf("invalid unit_guid format: %v", err)
+			}
+			row.UnitGuid = guid
+		case 4: // msg_id
+			if field != "" {
+				row.MsgID = sql.NullString{String: field, Valid: true}
+			}
+		case 5: // text
+			if field != "" {
+				row.Text = sql.NullString{String: field, Valid: true}
+			}
+		case 6: // context
+			if field != "" {
+				row.Context = sql.NullString{String: field, Valid: true}
+			}
+		case 7: // class
+			if field != "" {
+				row.Class = sql.NullString{String: field, Valid: true}
+			}
+		case 8: // level
+			if field != "" {
+				level, err := parseLevel(field)
+				if err != nil {
+					return TSVRow{}, fmt.Errorf("invalid level: %v", err)
+				}
+				row.Level = sql.NullInt32{Int32: level, Valid: true}
+			}
+		case 9: // area
+			if field != "" {
+				row.Area = sql.NullString{String: field, Valid: true}
+			}
+		case 10: // addr
+			if field != "" {
+				row.Addr = sql.NullString{String: field, Valid: true}
+			}
+		case 11: // block
+			if field != "" {
+				row.Block = sql.NullString{String: field, Valid: true}
+			}
+		case 12: // type
+			if field != "" {
+				row.Type = sql.NullString{String: field, Valid: true}
+			}
+		case 13: // bit
+			if field != "" {
+				bit, err := parseBit(field)
+				if err != nil {
+					return TSVRow{}, fmt.Errorf("invalid bit: %v", err)
+				}
+				row.Bit = sql.NullInt32{Int32: bit, Valid: true}
+			}
+		case 14: // invert_bit
+			if field != "" {
+				invertBit, err := parseInvertBit(field)
+				if err != nil {
+					return TSVRow{}, fmt.Errorf("invalid invert_bit: %v", err)
+				}
+				row.InvertBit = sql.NullBool{Bool: invertBit, Valid: true}
+			}
+		}
+	}
+
+	// Проверяем обязательные поля
+	if row.UnitGuid == uuid.Nil {
+		return TSVRow{}, fmt.Errorf("unit_guid is required")
+	}
+
+	return row, nil
+}
+
+// Вспомогательные функции для парсинга
+func parseLevel(field string) (int32, error) {
+	level, err := strconv.ParseInt(field, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(level), nil
+}
+
+func parseBit(field string) (int32, error) {
+	bit, err := strconv.ParseInt(field, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(bit), nil
+}
+
+func parseInvertBit(field string) (bool, error) {
+	// Может быть "true"/"false", "1"/"0", или "да"/"нет"
+	field = strings.ToLower(strings.TrimSpace(field))
+	switch field {
+	case "true", "1", "да", "yes":
+		return true, nil
+	case "false", "0", "нет", "no", "":
+		return false, nil
+	default:
+		// Пробуем как число
+		if val, err := strconv.ParseBool(field); err == nil {
+			return val, nil
+		}
+		return false, fmt.Errorf("cannot parse invert_bit: %s", field)
+	}
 }
 
 // generateReports генерирует отчеты для данных
