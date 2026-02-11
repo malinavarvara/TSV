@@ -4,13 +4,16 @@ import (
 	"TSVProcessingService/db/sqlc"
 	"TSVProcessingService/internal/config"
 	"TSVProcessingService/internal/watcher"
-	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +60,12 @@ func NewProcessor(queries *sqlc.Queries, config *config.DirectoryConfig) *Proces
 		queries: queries,
 		config:  config,
 	}
+}
+
+// normalizeTSV заменяет два и более пробела на табуляцию
+func normalizeTSV(content []byte) []byte {
+	re := regexp.MustCompile(`[ ]{2,}`)
+	return re.ReplaceAll(content, []byte("\t"))
 }
 
 // ProcessFile обрабатывает TSV файл
@@ -174,178 +183,189 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 	return nil
 }
 
-// parseTSVFile парсит TSV файл
 func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []ProcessingError) {
-	file, err := os.Open(filePath)
+	log.Printf("🔍 Начинаем парсинг файла: %s", filePath)
+
+	// 1. Читаем весь файл
+	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return []TSVRow{}, []ProcessingError{{
-			LineNumber:   sql.NullInt32{},
-			RawLine:      sql.NullString{},
-			ErrorMessage: fmt.Sprintf("Failed to open file: %v", err),
-			FieldName:    sql.NullString{},
+		log.Printf("❌ Ошибка чтения файла: %v", err)
+		return nil, []ProcessingError{{
+			ErrorMessage: fmt.Sprintf("failed to read file: %v", err),
 		}}
 	}
-	defer file.Close()
+
+	// 2. Нормализуем: два+ пробела -> табуляция
+	normalized := normalizeTSV(content)
+
+	// 3. Создаём CSV Reader с разделителем TAB
+	reader := csv.NewReader(bytes.NewReader(normalized))
+	reader.Comma = '\t'
+	reader.FieldsPerRecord = -1    // разрешаем разное количество полей
+	reader.TrimLeadingSpace = true // обрезаем пробелы в начале/конце
 
 	var rows []TSVRow
 	var errors []ProcessingError
 
-	// Читаем файл построчно
-	scanner := bufio.NewScanner(file)
 	lineNumber := int32(0)
-	isFirstDataLine := true // Для пропуска заголовков
+	headerSkipped := false
 
-	for scanner.Scan() {
-		lineNumber++
-		rawLine := scanner.Text()
-
-		// Пропускаем пустые строки и комментарии
-		if strings.TrimSpace(rawLine) == "" || strings.HasPrefix(strings.TrimSpace(rawLine), "#") {
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			lineNumber++
+			log.Printf("❌ Ошибка чтения строки %d: %v", lineNumber, err)
+			errors = append(errors, ProcessingError{
+				LineNumber:   sql.NullInt32{Int32: lineNumber, Valid: true},
+				ErrorMessage: fmt.Sprintf("CSV read error: %v", err),
+			})
 			continue
 		}
 
-		// Разбиваем строку по табуляции
-		fields := strings.Split(rawLine, "\t")
+		lineNumber++
+		rawLine := strings.Join(record, "\t") // для логирования
 
-		// Пропускаем строку заголовков (первая непустая строка после комментариев)
-		if isFirstDataLine {
-			// Проверяем, что это заголовок (содержит названия полей)
-			if strings.Contains(strings.ToLower(rawLine), "n\tmqtt\tinvid") ||
-				strings.Contains(strings.ToLower(rawLine), "номер\tmqtt") {
-				isFirstDataLine = false
-				continue
-			}
-			isFirstDataLine = false
+		// Пропускаем пустые строки
+		if len(record) == 0 || (len(record) == 1 && strings.TrimSpace(record[0]) == "") {
+			continue
 		}
 
-		// Обрабатываем строку данных
-		row, err := p.parseLine(fields, lineNumber, rawLine)
+		// Пропускаем комментарии (строки, начинающиеся с #)
+		if len(record) > 0 && strings.HasPrefix(strings.TrimSpace(record[0]), "#") {
+			continue
+		}
+
+		// Первая не-комментарийная строка — заголовок
+		if !headerSkipped {
+			headerSkipped = true
+			log.Printf("Пропускаем заголовок: %s", rawLine)
+			continue
+		}
+
+		// Парсим строку данных
+		row, err := p.parseLine(record, lineNumber, rawLine)
 		if err != nil {
+			log.Printf("❌ Ошибка строки %d: %v", lineNumber, err)
 			errors = append(errors, ProcessingError{
 				LineNumber:   sql.NullInt32{Int32: lineNumber, Valid: true},
 				RawLine:      sql.NullString{String: rawLine, Valid: true},
 				ErrorMessage: err.Error(),
-				FieldName:    sql.NullString{},
 			})
 			continue
 		}
 
 		rows = append(rows, row)
+		log.Printf("✅ Строка %d: unit_guid=%s, msg_id=%v", lineNumber, row.UnitGuid, row.MsgID)
 	}
 
-	if err := scanner.Err(); err != nil {
-		errors = append(errors, ProcessingError{
-			LineNumber:   sql.NullInt32{},
-			RawLine:      sql.NullString{},
-			ErrorMessage: fmt.Sprintf("Error reading file: %v", err),
-			FieldName:    sql.NullString{},
-		})
-	}
-
-	log.Printf("Parsed %d rows, %d errors from %s", len(rows), len(errors), filepath.Base(filePath))
+	log.Printf("📊 Парсинг завершен: %d строк, %d ошибок", len(rows), len(errors))
 	return rows, errors
 }
 
-// parseLine парсит одну строку TSV
+// parseLine - улучшенная версия
+// parseLine находит UUID и распределяет поля относительно его позиции
 func (p *Processor) parseLine(fields []string, lineNumber int32, rawLine string) (TSVRow, error) {
-	// TSV файл должен содержать минимум 14 полей (в зависимости от формата)
-	// Проверяем минимальное количество полей
-	if len(fields) < 5 { // Минимум: n, mqtt, invid, unit_guid, msg_id
-		return TSVRow{}, fmt.Errorf("insufficient fields: expected at least 5, got %d", len(fields))
-	}
+	row := TSVRow{LineNumber: lineNumber}
 
-	row := TSVRow{
-		LineNumber: lineNumber,
-	}
-
-	// Парсим каждое поле
+	// 1. Ищем поле с корректным UUID (unit_guid)
+	guidIndex := -1
+	var guid uuid.UUID
+	var err error
 	for i, field := range fields {
 		field = strings.TrimSpace(field)
-
-		// Определяем тип поля по его позиции
-		switch i {
-		case 0: // n (номер) - пропускаем, так как у нас есть lineNumber
+		if field == "" {
 			continue
-		case 1: // mqtt
-			if field != "" {
-				row.Mqtt = sql.NullString{String: field, Valid: true}
-			}
-		case 2: // invid
-			if field != "" {
-				row.Invid = sql.NullString{String: field, Valid: true}
-			}
-		case 3: // unit_guid (самое важное поле!)
-			if field == "" {
-				return TSVRow{}, fmt.Errorf("unit_guid is required")
-			}
-			// Парсим UUID
-			guid, err := uuid.Parse(field)
-			if err != nil {
-				return TSVRow{}, fmt.Errorf("invalid unit_guid format: %v", err)
-			}
-			row.UnitGuid = guid
-		case 4: // msg_id
-			if field != "" {
-				row.MsgID = sql.NullString{String: field, Valid: true}
-			}
-		case 5: // text
-			if field != "" {
-				row.Text = sql.NullString{String: field, Valid: true}
-			}
-		case 6: // context
-			if field != "" {
-				row.Context = sql.NullString{String: field, Valid: true}
-			}
-		case 7: // class
-			if field != "" {
-				row.Class = sql.NullString{String: field, Valid: true}
-			}
-		case 8: // level
-			if field != "" {
-				level, err := parseLevel(field)
-				if err != nil {
-					return TSVRow{}, fmt.Errorf("invalid level: %v", err)
-				}
-				row.Level = sql.NullInt32{Int32: level, Valid: true}
-			}
-		case 9: // area
-			if field != "" {
-				row.Area = sql.NullString{String: field, Valid: true}
-			}
-		case 10: // addr
-			if field != "" {
-				row.Addr = sql.NullString{String: field, Valid: true}
-			}
-		case 11: // block
-			if field != "" {
-				row.Block = sql.NullString{String: field, Valid: true}
-			}
-		case 12: // type
-			if field != "" {
-				row.Type = sql.NullString{String: field, Valid: true}
-			}
-		case 13: // bit
-			if field != "" {
-				bit, err := parseBit(field)
-				if err != nil {
-					return TSVRow{}, fmt.Errorf("invalid bit: %v", err)
-				}
-				row.Bit = sql.NullInt32{Int32: bit, Valid: true}
-			}
-		case 14: // invert_bit
-			if field != "" {
-				invertBit, err := parseInvertBit(field)
-				if err != nil {
-					return TSVRow{}, fmt.Errorf("invalid invert_bit: %v", err)
-				}
-				row.InvertBit = sql.NullBool{Bool: invertBit, Valid: true}
-			}
+		}
+		guid, err = uuid.Parse(field)
+		if err == nil {
+			guidIndex = i
+			break
+		}
+	}
+	if guidIndex == -1 {
+		return row, fmt.Errorf("unit_guid (UUID) not found in line")
+	}
+	row.UnitGuid = guid
+
+	// 2. Поле перед GUID — invid (инвентарный номер)
+	if guidIndex-1 >= 0 {
+		if val := strings.TrimSpace(fields[guidIndex-1]); val != "" {
+			row.Invid = sql.NullString{String: val, Valid: true}
 		}
 	}
 
-	// Проверяем обязательные поля
-	if row.UnitGuid == uuid.Nil {
-		return TSVRow{}, fmt.Errorf("unit_guid is required")
+	// 3. Ещё раньше — mqtt (если есть)
+	if guidIndex-2 >= 0 {
+		if val := strings.TrimSpace(fields[guidIndex-2]); val != "" && val != row.Invid.String {
+			// Защита от ошибочного захвата номера строки
+			row.Mqtt = sql.NullString{String: val, Valid: true}
+		}
+	}
+
+	// 4. Поля после GUID — строго по порядку
+	if guidIndex+1 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+1]); val != "" {
+			row.MsgID = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+2 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+2]); val != "" {
+			row.Text = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+3 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+3]); val != "" {
+			row.Context = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+4 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+4]); val != "" {
+			row.Class = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+5 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+5]); val != "" {
+			if level, err := parseLevel(val); err == nil {
+				row.Level = sql.NullInt32{Int32: level, Valid: true}
+			}
+		}
+	}
+	if guidIndex+6 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+6]); val != "" {
+			row.Area = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+7 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+7]); val != "" {
+			row.Addr = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+8 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+8]); val != "" {
+			row.Block = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+9 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+9]); val != "" {
+			row.Type = sql.NullString{String: val, Valid: true}
+		}
+	}
+	if guidIndex+10 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+10]); val != "" {
+			if bit, err := parseBit(val); err == nil {
+				row.Bit = sql.NullInt32{Int32: bit, Valid: true}
+			}
+		}
+	}
+	if guidIndex+11 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+11]); val != "" {
+			if invert, err := parseInvertBit(val); err == nil {
+				row.InvertBit = sql.NullBool{Bool: invert, Valid: true}
+			}
+		}
 	}
 
 	return row, nil
@@ -387,85 +407,76 @@ func parseInvertBit(field string) (bool, error) {
 
 // generateReports генерирует отчеты для данных
 func (p *Processor) generateReports(ctx context.Context, fileID int64, rows []TSVRow) error {
-	// Группируем данные по unit_guid
-	deviceDataByUnit := make(map[uuid.UUID][]sqlc.DeviceDatum)
+	// Группируем по unit_guid
+	byUnit := make(map[uuid.UUID][]TSVRow)
+	for _, row := range rows {
+		byUnit[row.UnitGuid] = append(byUnit[row.UnitGuid], row)
+	}
 
-	// TODO: Преобразовать TSVRow в sqlc.DeviceDatum и сгруппировать
-
-	for unitGuid, data := range deviceDataByUnit {
-		// Генерируем отчет для каждого устройства
-		reportPath, err := p.createReport(unitGuid, data)
+	for guid, data := range byUnit {
+		reportPath, err := p.createReport(guid, data)
 		if err != nil {
-			log.Printf("Failed to create report for %s: %v", unitGuid, err)
+			log.Printf("❌ Ошибка создания отчёта для %s: %v", guid, err)
 			continue
 		}
 
-		// Сохраняем информацию об отчете
-		reportParams := sqlc.CreateReportParams{
-			UnitGuid:   unitGuid,
-			ReportType: sql.NullString{String: "pdf", Valid: true},
+		params := sqlc.CreateReportParams{
+			UnitGuid:   guid,
+			ReportType: sql.NullString{String: "txt", Valid: true},
 			FilePath:   reportPath,
 		}
-
-		if _, err := p.queries.CreateReport(ctx, reportParams); err != nil {
-			log.Printf("Failed to save report record: %v", err)
+		if _, err := p.queries.CreateReport(ctx, params); err != nil {
+			log.Printf("❌ Ошибка сохранения отчёта в БД: %v", err)
+		} else {
+			log.Printf("✅ Отчёт создан: %s", reportPath)
 		}
 	}
-
 	return nil
 }
 
-// createReport создает отчет для устройства
-func (p *Processor) createReport(unitGuid uuid.UUID, data []sqlc.DeviceDatum) (string, error) {
-	// Создаем выходную директорию если не существует
+func (p *Processor) createReport(unitGuid uuid.UUID, data []TSVRow) (string, error) {
 	if err := os.MkdirAll(p.config.OutputPath, 0755); err != nil {
 		return "", err
 	}
 
-	// Генерируем имя файла
 	timestamp := time.Now().Format("20060102_150405")
-	filename := unitGuid.String() + "_" + timestamp + ".txt"
+	filename := fmt.Sprintf("%s_%s.txt", unitGuid.String(), timestamp)
 	path := filepath.Join(p.config.OutputPath, filename)
 
-	// TODO: Заменить на реальную генерацию PDF/RTF/DOC
-	// Сейчас создаем простой текстовый файл
 	content := p.generateTextReport(unitGuid, data)
-
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return "", err
 	}
-
 	return path, nil
 }
 
-// generateTextReport генерирует текстовый отчет
-func (p *Processor) generateTextReport(unitGuid uuid.UUID, data []sqlc.DeviceDatum) string {
-	var builder strings.Builder
+func (p *Processor) generateTextReport(unitGuid uuid.UUID, data []TSVRow) string {
+	var b strings.Builder
+	b.WriteString("Device Report\n")
+	b.WriteString("=============\n\n")
+	b.WriteString("Unit GUID: " + unitGuid.String() + "\n")
+	b.WriteString("Generated: " + time.Now().Format(time.RFC3339) + "\n")
+	b.WriteString("Total records: " + fmt.Sprintf("%d", len(data)) + "\n\n")
 
-	builder.WriteString("Device Report\n")
-	builder.WriteString("=============\n\n")
-	builder.WriteString("Unit GUID: " + unitGuid.String() + "\n")
-	builder.WriteString("Generated: " + time.Now().Format(time.RFC3339) + "\n")
-	builder.WriteString("Total records: " + fmt.Sprintf("%d", len(data)) + "\n\n")
-
-	builder.WriteString("Device Data:\n")
-	builder.WriteString("------------\n")
-
-	for i, item := range data {
-		builder.WriteString(fmt.Sprintf("\nRecord %d:\n", i+1))
-		if item.MsgID.Valid {
-			builder.WriteString("  Message ID: " + item.MsgID.String + "\n")
+	b.WriteString("Device Data:\n")
+	b.WriteString("------------\n")
+	for i, row := range data {
+		b.WriteString(fmt.Sprintf("\nRecord %d:\n", i+1))
+		if row.MsgID.Valid {
+			b.WriteString("  Message ID: " + row.MsgID.String + "\n")
 		}
-		if item.Text.Valid {
-			builder.WriteString("  Text: " + item.Text.String + "\n")
+		if row.Text.Valid {
+			b.WriteString("  Text: " + row.Text.String + "\n")
 		}
-		if item.Class.Valid {
-			builder.WriteString("  Class: " + item.Class.String + "\n")
+		if row.Class.Valid {
+			b.WriteString("  Class: " + row.Class.String + "\n")
 		}
-		if item.Level.Valid {
-			builder.WriteString("  Level: " + fmt.Sprintf("%d", item.Level.Int32) + "\n")
+		if row.Level.Valid {
+			b.WriteString("  Level: " + fmt.Sprintf("%d", row.Level.Int32) + "\n")
+		}
+		if row.Addr.Valid {
+			b.WriteString("  Address: " + row.Addr.String + "\n")
 		}
 	}
-
-	return builder.String()
+	return b.String()
 }
