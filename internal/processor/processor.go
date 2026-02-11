@@ -30,7 +30,7 @@ type Processor struct {
 // TSVRow представляет строку из TSV файла
 type TSVRow struct {
 	UnitGuid   uuid.UUID
-	Mqtt       sql.NullString
+	Mqtt       sql.NullString // всегда NULL, поле отсутствует в файлах
 	Invid      sql.NullString
 	MsgID      sql.NullString
 	Text       sql.NullString
@@ -119,7 +119,7 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 		deviceDataParams := sqlc.CreateDeviceDataParams{
 			FileID:     file.ID,
 			UnitGuid:   row.UnitGuid,
-			Mqtt:       row.Mqtt,
+			Mqtt:       row.Mqtt, // всегда NULL
 			Invid:      row.Invid,
 			MsgID:      row.MsgID,
 			Text:       row.Text,
@@ -137,7 +137,7 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 
 		_, err := p.queries.CreateDeviceData(ctx, deviceDataParams)
 		if err != nil {
-			log.Printf("Error saving device data: %v", err)
+			log.Printf("❌ Error saving device data: %v", err)
 			failedCount++
 			continue
 		}
@@ -183,6 +183,7 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 	return nil
 }
 
+// parseTSVFile парсит TSV файл, нормализует разделители и пропускает заголовки
 func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []ProcessingError) {
 	log.Printf("🔍 Начинаем парсинг файла: %s", filePath)
 
@@ -201,14 +202,13 @@ func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []Pro
 	// 3. Создаём CSV Reader с разделителем TAB
 	reader := csv.NewReader(bytes.NewReader(normalized))
 	reader.Comma = '\t'
-	reader.FieldsPerRecord = -1    // разрешаем разное количество полей
-	reader.TrimLeadingSpace = true // обрезаем пробелы в начале/конце
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
 
 	var rows []TSVRow
 	var errors []ProcessingError
 
 	lineNumber := int32(0)
-	headerSkipped := false
 
 	for {
 		record, err := reader.Read()
@@ -238,11 +238,13 @@ func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []Pro
 			continue
 		}
 
-		// Первая не-комментарийная строка — заголовок
-		if !headerSkipped {
-			headerSkipped = true
-			log.Printf("Пропускаем заголовок: %s", rawLine)
-			continue
+		// Пропускаем заголовки: первое поле не является числом
+		if len(record) > 0 {
+			_, err := strconv.Atoi(strings.TrimSpace(record[0]))
+			if err != nil {
+				log.Printf("Пропускаем заголовок: %s", rawLine)
+				continue
+			}
 		}
 
 		// Парсим строку данных
@@ -265,8 +267,7 @@ func (p *Processor) parseTSVFile(filePath string, fileID int64) ([]TSVRow, []Pro
 	return rows, errors
 }
 
-// parseLine - улучшенная версия
-// parseLine находит UUID и распределяет поля относительно его позиции
+// parseLine ищет UUID и распределяет поля по относительным индексам
 func (p *Processor) parseLine(fields []string, lineNumber int32, rawLine string) (TSVRow, error) {
 	row := TSVRow{LineNumber: lineNumber}
 
@@ -289,89 +290,115 @@ func (p *Processor) parseLine(fields []string, lineNumber int32, rawLine string)
 		return row, fmt.Errorf("unit_guid (UUID) not found in line")
 	}
 	row.UnitGuid = guid
+	log.Printf("   🎯 UUID найден на позиции %d: %s", guidIndex, guid)
 
-	// 2. Поле перед GUID — invid (инвентарный номер)
+	// 2. Поле перед UUID — invid (инвентарный номер)
 	if guidIndex-1 >= 0 {
 		if val := strings.TrimSpace(fields[guidIndex-1]); val != "" {
 			row.Invid = sql.NullString{String: val, Valid: true}
+			log.Printf("   📦 invid[%d]: %s", guidIndex-1, val)
 		}
 	}
 
-	// 3. Ещё раньше — mqtt (если есть)
-	if guidIndex-2 >= 0 {
-		if val := strings.TrimSpace(fields[guidIndex-2]); val != "" && val != row.Invid.String {
-			// Защита от ошибочного захвата номера строки
-			row.Mqtt = sql.NullString{String: val, Valid: true}
-		}
-	}
-
-	// 4. Поля после GUID — строго по порядку
+	// 3. msg_id — сразу после UUID
 	if guidIndex+1 < len(fields) {
 		if val := strings.TrimSpace(fields[guidIndex+1]); val != "" {
 			row.MsgID = sql.NullString{String: val, Valid: true}
+			log.Printf("   📨 msg_id[%d]: %s", guidIndex+1, val)
 		}
 	}
+
+	// 4. text
 	if guidIndex+2 < len(fields) {
 		if val := strings.TrimSpace(fields[guidIndex+2]); val != "" {
 			row.Text = sql.NullString{String: val, Valid: true}
+			log.Printf("   📝 text[%d]: %s", guidIndex+2, val)
 		}
 	}
+
+	// 5. class (waiting/working/alarm/info и т.д.)
 	if guidIndex+3 < len(fields) {
 		if val := strings.TrimSpace(fields[guidIndex+3]); val != "" {
-			row.Context = sql.NullString{String: val, Valid: true}
-		}
-	}
-	if guidIndex+4 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+4]); val != "" {
 			row.Class = sql.NullString{String: val, Valid: true}
+			log.Printf("   🏷️ class[%d]: %s", guidIndex+3, val)
 		}
 	}
-	if guidIndex+5 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+5]); val != "" {
-			if level, err := parseLevel(val); err == nil {
+
+	// 6. level (число)
+	if guidIndex+4 < len(fields) {
+		val := strings.TrimSpace(fields[guidIndex+4])
+		if val != "" {
+			level, err := parseLevel(val)
+			if err == nil {
 				row.Level = sql.NullInt32{Int32: level, Valid: true}
-			}
-		}
-	}
-	if guidIndex+6 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+6]); val != "" {
-			row.Area = sql.NullString{String: val, Valid: true}
-		}
-	}
-	if guidIndex+7 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+7]); val != "" {
-			row.Addr = sql.NullString{String: val, Valid: true}
-		}
-	}
-	if guidIndex+8 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+8]); val != "" {
-			row.Block = sql.NullString{String: val, Valid: true}
-		}
-	}
-	if guidIndex+9 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+9]); val != "" {
-			row.Type = sql.NullString{String: val, Valid: true}
-		}
-	}
-	if guidIndex+10 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+10]); val != "" {
-			if bit, err := parseBit(val); err == nil {
-				row.Bit = sql.NullInt32{Int32: bit, Valid: true}
-			}
-		}
-	}
-	if guidIndex+11 < len(fields) {
-		if val := strings.TrimSpace(fields[guidIndex+11]); val != "" {
-			if invert, err := parseInvertBit(val); err == nil {
-				row.InvertBit = sql.NullBool{Bool: invert, Valid: true}
+				log.Printf("   📊 level[%d]: %d", guidIndex+4, level)
+			} else {
+				log.Printf("   ⚠️ Не удалось распарсить level '%s': %v", val, err)
 			}
 		}
 	}
 
+	// 7. area (LOCAL / HR / IR и т.д.)
+	if guidIndex+5 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+5]); val != "" {
+			row.Area = sql.NullString{String: val, Valid: true}
+			log.Printf("   🌍 area[%d]: %s", guidIndex+5, val)
+		}
+	}
+
+	// 8. addr (адрес переменной)
+	if guidIndex+6 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+6]); val != "" {
+			row.Addr = sql.NullString{String: val, Valid: true}
+			log.Printf("   📍 addr[%d]: %s", guidIndex+6, val)
+		}
+	}
+
+	// 9. block
+	if guidIndex+7 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+7]); val != "" {
+			row.Block = sql.NullString{String: val, Valid: true}
+			log.Printf("   🧱 block[%d]: %s", guidIndex+7, val)
+		}
+	}
+
+	// 10. type
+	if guidIndex+8 < len(fields) {
+		if val := strings.TrimSpace(fields[guidIndex+8]); val != "" {
+			row.Type = sql.NullString{String: val, Valid: true}
+			log.Printf("   🔧 type[%d]: %s", guidIndex+8, val)
+		}
+	}
+
+	// 11. bit
+	if guidIndex+9 < len(fields) {
+		val := strings.TrimSpace(fields[guidIndex+9])
+		if val != "" {
+			bit, err := parseBit(val)
+			if err == nil {
+				row.Bit = sql.NullInt32{Int32: bit, Valid: true}
+				log.Printf("   🎲 bit[%d]: %d", guidIndex+9, bit)
+			}
+		}
+	}
+
+	// 12. invert_bit
+	if guidIndex+10 < len(fields) {
+		val := strings.TrimSpace(fields[guidIndex+10])
+		if val != "" {
+			invert, err := parseInvertBit(val)
+			if err == nil {
+				row.InvertBit = sql.NullBool{Bool: invert, Valid: true}
+				log.Printf("   🔄 invert_bit[%d]: %v", guidIndex+10, invert)
+			}
+		}
+	}
+
+	// Поля Mqtt и Context всегда NULL — их нет в файлах
 	return row, nil
 }
 
-// Вспомогательные функции для парсинга
+// parseLevel парсит строку в int32
 func parseLevel(field string) (int32, error) {
 	level, err := strconv.ParseInt(field, 10, 32)
 	if err != nil {
@@ -380,6 +407,7 @@ func parseLevel(field string) (int32, error) {
 	return int32(level), nil
 }
 
+// parseBit парсит строку в int32
 func parseBit(field string) (int32, error) {
 	bit, err := strconv.ParseInt(field, 10, 32)
 	if err != nil {
@@ -388,8 +416,8 @@ func parseBit(field string) (int32, error) {
 	return int32(bit), nil
 }
 
+// parseInvertBit парсит строку в bool
 func parseInvertBit(field string) (bool, error) {
-	// Может быть "true"/"false", "1"/"0", или "да"/"нет"
 	field = strings.ToLower(strings.TrimSpace(field))
 	switch field {
 	case "true", "1", "да", "yes":
@@ -397,7 +425,6 @@ func parseInvertBit(field string) (bool, error) {
 	case "false", "0", "нет", "no", "":
 		return false, nil
 	default:
-		// Пробуем как число
 		if val, err := strconv.ParseBool(field); err == nil {
 			return val, nil
 		}
@@ -407,7 +434,6 @@ func parseInvertBit(field string) (bool, error) {
 
 // generateReports генерирует отчеты для данных
 func (p *Processor) generateReports(ctx context.Context, fileID int64, rows []TSVRow) error {
-	// Группируем по unit_guid
 	byUnit := make(map[uuid.UUID][]TSVRow)
 	for _, row := range rows {
 		byUnit[row.UnitGuid] = append(byUnit[row.UnitGuid], row)
