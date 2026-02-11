@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ type App struct {
 	processor *processor.Processor
 	router    *mux.Router
 	server    *http.Server
+	workerWg  sync.WaitGroup
 }
 
 func main() {
@@ -159,36 +161,46 @@ func (a *App) Run() error {
 // startDirectoryWatcher - запуск мониторинга директории
 func (a *App) startDirectoryWatcher() {
 	log.Printf("👀 Starting directory watcher for: %s", a.config.Directory.WatchPath)
-
-	// Запускаем watcher
+	// Запускаем watcher (он сам наполняет очередь)
 	go a.watcher.Start()
-
-	// Обрабатываем файлы из очереди watcher
-	go a.processFileQueue()
 }
 
-// processFileQueue - обработка файлов из очереди watcher
-func (a *App) processFileQueue() {
-	log.Println("📂 Starting file queue processor")
+// startWorkers - запуск пула воркеров для параллельной обработки файлов
+func (a *App) startWorkers() {
+	log.Printf("👷 Starting %d workers", a.config.Worker.MaxWorkers)
 
-	for fileInfo := range a.watcher.GetFileQueue() {
-		log.Printf("Processing file: %s (hash: %s)",
-			fileInfo.Name, fileInfo.Hash[:8])
+	fileQueue := a.watcher.GetFileQueue()
 
-		// Обработка файла через processor
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		if err := a.processor.ProcessFile(ctx, fileInfo); err != nil {
-			log.Printf("Error processing file %s: %v", fileInfo.Name, err)
-		}
-		cancel()
+	// Запускаем указанное количество воркеров
+	for i := 0; i < a.config.Worker.MaxWorkers; i++ {
+		a.workerWg.Add(1)
+		go a.worker(i+1, fileQueue)
 	}
 }
 
-// startWorkers - запуск воркеров
-func (a *App) startWorkers() {
-	log.Printf("👷 Starting %d workers", a.config.Worker.MaxWorkers)
-	// TODO: Реализация воркеров для параллельной обработки
-	// Можно использовать worker pool для обработки нескольких файлов одновременно
+// worker - отдельный воркер, обрабатывающий файлы из очереди
+func (a *App) worker(id int, fileQueue <-chan watcher.FileInfo) {
+	defer a.workerWg.Done()
+	log.Printf("  👤 Worker %d started", id)
+
+	for fileInfo := range fileQueue {
+		log.Printf("Worker %d: processing file: %s (hash: %s)",
+			id, fileInfo.Name, fileInfo.Hash[:8])
+
+		// Обработка файла через processor
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		err := a.processor.ProcessFile(ctx, fileInfo)
+		cancel()
+
+		if err != nil {
+			log.Printf("Worker %d: error processing file %s: %v",
+				id, fileInfo.Name, err)
+		} else {
+			log.Printf("Worker %d: completed file %s", id, fileInfo.Name)
+		}
+	}
+
+	log.Printf("  👤 Worker %d stopped (queue closed)", id)
 }
 
 // startAPIServer - запуск API сервера
@@ -624,7 +636,21 @@ func (a *App) shutdown() error {
 		log.Println("  ✓ Directory watcher stopped")
 	}
 
-	// 3. Закрытие соединения с базой данных
+	// 3. Ожидаем завершения всех воркеров (с таймаутом)
+	log.Println("  ⏳ Waiting for workers to finish current tasks...")
+	waitChan := make(chan struct{})
+	go func() {
+		a.workerWg.Wait()
+		close(waitChan)
+	}()
+	select {
+	case <-waitChan:
+		log.Println("  ✓ All workers stopped")
+	case <-time.After(30 * time.Second):
+		log.Println("  ⚠️ Worker shutdown timeout (some tasks may be incomplete)")
+	}
+
+	// 4. Закрытие соединения с базой данных
 	if a.store != nil {
 		if err := a.store.Close(); err != nil {
 			log.Printf("  Error closing database: %v", err)
