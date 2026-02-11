@@ -4,6 +4,7 @@ package watcher
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -175,4 +176,14 @@ func (w *Watcher) ClearProcessed() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.processed = make(map[string]bool)
+}
+
+func (w *Watcher) SendToQueue(fileInfo FileInfo) error {
+	select {
+	case w.fileQueue <- fileInfo:
+		w.markAsProcessed(fileInfo.Hash)
+		return nil
+	default:
+		return fmt.Errorf("queue is full")
+	}
 }

@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:12-alpine
+    container_name: tsv-processing-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-root}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
+      POSTGRES_DB: ${DB_NAME:-tsv_db}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-root} -d ${DB_NAME:-tsv_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  migrate:
+    image: migrate/migrate:v4.15.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migration:/migrations
+    command:
+      - "-path=/migrations"
+      - "-database=postgresql://${DB_USER:-root}:${DB_PASSWORD:-secret}@postgres:5432/${DB_NAME:-tsv_db}?sslmode=disable"
+      - "up"
+    restart: "no"
+
+  app:
+    build: .
+    container_name: tsv-processing-app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    volumes:
+      - ./incoming:/incoming
+      - ./reports:/reports
+      - ./archive:/archive
+      - ./tmp:/tmp
+    environment:
+      TSV_DATABASE_HOST: postgres
+      TSV_DATABASE_PORT: 5432
+      TSV_DATABASE_USER: ${DB_USER:-root}
+      TSV_DATABASE_PASSWORD: ${DB_PASSWORD:-secret}
+      TSV_DATABASE_NAME: ${DB_NAME:-tsv_db}
+      TSV_DIRECTORY_WATCH_PATH: /incoming
+      TSV_DIRECTORY_OUTPUT_PATH: /reports
+      TSV_DIRECTORY_ARCHIVE_PATH: /archive
+      TSV_DIRECTORY_TEMP_PATH: /tmp
+      TSV_SERVER_HOST: 0.0.0.0
+      TSV_SERVER_PORT: 8080
+      TSV_WORKER_MAX_WORKERS: ${WORKERS:-2}
+      TSV_LOGGING_LEVEL: ${LOG_LEVEL:-info}
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

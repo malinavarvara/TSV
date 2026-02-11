@@ -506,3 +506,66 @@ func (p *Processor) generateTextReport(unitGuid uuid.UUID, data []TSVRow) string
 	}
 	return b.String()
 }
+
+// GenerateReportForUnit генерирует отчёт для конкретного устройства по данным из БД
+func (p *Processor) GenerateReportForUnit(ctx context.Context, unitGuid uuid.UUID) error {
+	log.Printf("📊 Generating report for unit: %s", unitGuid)
+
+	// 1. Получаем все данные устройства из БД
+	//    (можно использовать существующий запрос с большим лимитом)
+	deviceData, err := p.queries.ListDeviceDataByUnit(ctx, sqlc.ListDeviceDataByUnitParams{
+		UnitGuid: unitGuid,
+		Limit:    10000, // достаточно большой лимит
+		Offset:   0,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to fetch device data: %w", err)
+	}
+
+	if len(deviceData) == 0 {
+		return fmt.Errorf("no data found for unit %s", unitGuid)
+	}
+
+	// 2. Преобразуем sqlc.DeviceDatum в TSVRow
+	rows := make([]TSVRow, 0, len(deviceData))
+	for _, d := range deviceData {
+		row := TSVRow{
+			UnitGuid:   d.UnitGuid,
+			Mqtt:       d.Mqtt,
+			Invid:      d.Invid,
+			MsgID:      d.MsgID,
+			Text:       d.Text,
+			Context:    d.Context,
+			Class:      d.Class,
+			Level:      d.Level,
+			Area:       d.Area,
+			Addr:       d.Addr,
+			Block:      d.Block,
+			Type:       d.Type,
+			Bit:        d.Bit,
+			InvertBit:  d.InvertBit,
+			LineNumber: d.LineNumber,
+		}
+		rows = append(rows, row)
+	}
+
+	// 3. Генерируем отчёт (createReport сам сохранит запись в таблицу reports)
+	reportPath, err := p.createReport(unitGuid, rows)
+	if err != nil {
+		return fmt.Errorf("failed to create report: %w", err)
+	}
+
+	// 4. Сохраняем информацию об отчёте в БД
+	params := sqlc.CreateReportParams{
+		UnitGuid:   unitGuid,
+		ReportType: sql.NullString{String: "txt", Valid: true},
+		FilePath:   reportPath,
+	}
+	if _, err := p.queries.CreateReport(ctx, params); err != nil {
+		log.Printf("⚠️ Report generated but failed to save record: %v", err)
+	} else {
+		log.Printf("✅ Report saved to database: %s", reportPath)
+	}
+
+	return nil
+}

@@ -1,19 +1,63 @@
-postgres:
-	docker run --name tsv-processing-app -p 5432:5432 -e POSTGRES_USER=root -e POSTGRES_PASSWORD=secret -d postgres:12-alpine
+# === Variables ===
+COMPOSE ?= docker compose
+PROJECT_NAME ?= tsvprocessingservice
 
-createdb:
-	docker exec -it tsv-processing-app createdb --username=root --owner=root tsv_db
+DB_CONTAINER ?= tsv-processing-db
+DB_USER ?= root
+DB_PASSWORD ?= secret
+DB_NAME ?= tsv_db
+DB_PORT ?= 5432
 
-dropdb:
-	docker exec -it tsv-processing-app dropdb tsv_db
+MIGRATION_PATH ?= db/migration
+MIGRATE_IMAGE ?= migrate/migrate:v4.15.2
+MIGRATE_DB_URL ?= postgresql://$(DB_USER):$(DB_PASSWORD)@localhost:$(DB_PORT)/$(DB_NAME)?sslmode=disable
 
+# === Docker Compose commands ===
+build:
+	$(COMPOSE) build
+
+up:
+	$(COMPOSE) up -d
+
+down:
+	$(COMPOSE) down
+
+logs:
+	$(COMPOSE) logs -f app
+
+restart:
+	$(COMPOSE) restart
+
+# === Database console ===
+psql:
+	docker exec -it $(DB_CONTAINER) psql -U $(DB_USER) -d $(DB_NAME)
+
+# === Migrations (run on host, connects to DB container) ===
 migrateup:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/tsv_db?sslmode=disable" -verbose up
+	docker run --rm --network $(PROJECT_NAME)_default \
+		-v $(PWD)/$(MIGRATION_PATH):/migrations \
+		$(MIGRATE_IMAGE) \
+		-path=/migrations \
+		-database "$(MIGRATE_DB_URL)" up
 
 migratedown:
-	migrate -path db/migration -database "postgresql://root:secret@localhost:5432/tsv_db?sslmode=disable" -verbose down
+	docker run --rm --network $(PROJECT_NAME)_default \
+		-v $(PWD)/$(MIGRATION_PATH):/migrations \
+		$(MIGRATE_IMAGE) \
+		-path=/migrations \
+		-database "$(MIGRATE_DB_URL)" down
 
+# === Full development cycle ===
+dev:
+	$(COMPOSE) up --build
+
+# === Clean everything (including volumes) ===
+clean:
+	$(COMPOSE) down -v
+	docker system prune -f
+
+# === SQLC code generation (local, requires sqlc installed) ===
 sqlc:
 	sqlc generate
 
-.PHONY: postgres createdb dropdb migrateup migratedown sqlc
+.PHONY: build up down logs restart psql migrateup migratedown dev clean sqlc

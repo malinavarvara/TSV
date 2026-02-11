@@ -8,9 +8,12 @@ import (
 	"TSVProcessingService/internal/processor"
 	"TSVProcessingService/internal/watcher"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -430,42 +433,57 @@ func (a *App) getFileErrors(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(errors)
 }
 
-// processFile - обработка файла по запросу API
+// processFile - обработка файла по запросу API (исправленная версия)
 func (a *App) processFile(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	filename := vars["filename"]
 
 	filePath := filepath.Join(a.config.Directory.WatchPath, filename)
 
-	// Проверяем существование файла
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	// 1. Проверяем существование файла и получаем размер
+	stat, err := os.Stat(filePath)
+	if os.IsNotExist(err) {
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "File not found",
-		})
+		json.NewEncoder(w).Encode(map[string]string{"error": "File not found"})
+		return
+	}
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to access file"})
 		return
 	}
 
-	// Создаем FileInfo для processor
+	// 2. Вычисляем хеш файла
+	hash, err := calculateFileHash(filePath)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to calculate file hash"})
+		return
+	}
+
+	// 3. Создаём FileInfo
 	fileInfo := watcher.FileInfo{
 		Name: filename,
 		Path: filePath,
-		Hash: "", // В реальности нужно вычислить хеш
-		Size: 0,  // В реальности нужно получить размер
+		Hash: hash,
+		Size: stat.Size(),
 	}
 
-	// Обрабатываем файл в горутине
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
+	// 4. Отправляем в очередь воркеров
+	if err := a.watcher.SendToQueue(fileInfo); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Processing queue is full"})
+		return
+	}
 
-		if err := a.processor.ProcessFile(ctx, fileInfo); err != nil {
-			log.Printf("API processing error for %s: %v", filename, err)
-		}
-	}()
+	log.Printf("API: queued file %s (hash: %s, size: %d bytes)",
+		filename, hash[:8], stat.Size())
 
 	json.NewEncoder(w).Encode(map[string]string{
-		"message": "File processing started",
+		"message":  "File processing started",
+		"filename": filename,
+		"hash":     hash[:8],
+		"size":     fmt.Sprintf("%d bytes", stat.Size()),
 	})
 }
 
@@ -498,7 +516,7 @@ func (a *App) getReports(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(reports)
 }
 
-// generateReport - генерация отчета для устройства
+// generateReport - генерация отчета для устройства (исправленная версия)
 func (a *App) generateReport(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	unitGuidStr := vars["unit_guid"]
@@ -506,13 +524,18 @@ func (a *App) generateReport(w http.ResponseWriter, r *http.Request) {
 	unitGuid, err := uuid.Parse(unitGuidStr)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "Invalid unit_guid format",
-		})
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid unit_guid format"})
 		return
 	}
 
-	// TODO: Реализовать генерацию отчета через processor
+	// Запускаем генерацию в горутине, чтобы не блокировать HTTP-ответ
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.processor.GenerateReportForUnit(ctx, unitGuid); err != nil {
+			log.Printf("❌ Error generating report for %s: %v", unitGuid, err)
+		}
+	}()
 
 	json.NewEncoder(w).Encode(map[string]string{
 		"message":   "Report generation started",
@@ -522,11 +545,12 @@ func (a *App) generateReport(w http.ResponseWriter, r *http.Request) {
 
 // getStatistics - получение статистики
 func (a *App) getStatistics(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
-	stats, err := a.queries.GetApiStatistics(ctx)
+	stats, err := a.store.GetStatistics(ctx)
 	if err != nil {
+		log.Printf("❌ Error fetching statistics: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": "Failed to fetch statistics",
@@ -534,6 +558,7 @@ func (a *App) getStatistics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }
 
@@ -661,4 +686,19 @@ func (a *App) shutdown() error {
 
 	log.Println("👋 Application shutdown complete")
 	return nil
+}
+
+// calculateFileHash вычисляет SHA256 хеш файла
+func calculateFileHash(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
