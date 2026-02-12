@@ -41,6 +41,7 @@ type DirectoryConfig struct {
 	WatchPath   string `mapstructure:"watch_path"`
 	OutputPath  string `mapstructure:"output_path"`
 	ArchivePath string `mapstructure:"archive_path"`
+	ErrorPath   string `mapstructure:"error_path"`
 	TempPath    string `mapstructure:"temp_path"`
 }
 

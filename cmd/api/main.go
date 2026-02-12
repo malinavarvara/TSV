@@ -99,7 +99,7 @@ func initializeApp() (*App, error) {
 	)
 
 	// 6. Создание processor
-	processor := processor.NewProcessor(queries, &cfg.Directory)
+	processor := processor.NewProcessor(db, queries, &cfg.Directory)
 
 	// 7. Инициализация структуры приложения
 	app := &App{
@@ -123,6 +123,7 @@ func createDirectories(cfg *config.AppConfig) error {
 		cfg.Directory.WatchPath,
 		cfg.Directory.OutputPath,
 		cfg.Directory.ArchivePath,
+		cfg.Directory.ErrorPath,
 		cfg.Directory.TempPath,
 		"logs",
 	}

@@ -64,6 +64,8 @@ CREATE INDEX ON "files" ("status");
 
 CREATE INDEX ON "files" ("created_at");
 
+CREATE INDEX ON "files" ("file_hash");
+
 CREATE INDEX ON "device_data" ("unit_guid");
 
 CREATE INDEX ON "device_data" ("file_id");
@@ -85,6 +87,14 @@ CREATE INDEX ON "reports" ("generated_at");
 CREATE INDEX ON "api_logs" ("unit_guid");
 
 CREATE INDEX ON "api_logs" ("created_at");
+
+CREATE INDEX ON "files" ("status", "created_at");
+
+CREATE INDEX ON "device_data" ("level");
+
+CREATE INDEX ON "device_data" ("class", "created_at");
+
+CREATE INDEX ON "reports" ("unit_guid", "generated_at");
 
 ALTER TABLE "device_data" ADD FOREIGN KEY ("file_id") REFERENCES "files" ("id");
 

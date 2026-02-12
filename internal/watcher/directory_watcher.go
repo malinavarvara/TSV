@@ -14,115 +14,134 @@ import (
 	"time"
 )
 
-// FileInfo - информация о файле
+// FileInfo представляет информацию о файле, который будет обработан.
 type FileInfo struct {
-	Path    string
-	Name    string
-	Size    int64
-	ModTime time.Time
-	Hash    string
+	Path    string    // полный путь к файлу
+	Name    string    // имя файла
+	Size    int64     // размер в байтах
+	ModTime time.Time // время последней модификации
+	Hash    string    // SHA256 хеш содержимого файла
 }
 
-// Watcher - монитор директории
+// Watcher отвечает за периодическое сканирование директории,
+// обнаружение новых .tsv файлов и передачу их в очередь на обработку.
 type Watcher struct {
-	watchDir  string
-	interval  time.Duration
-	fileQueue chan FileInfo
-	processed map[string]bool
-	stopChan  chan struct{}
-	mu        sync.RWMutex // Добавьте это поле
+	watchDir  string        // директория для наблюдения
+	interval  time.Duration // интервал сканирования
+	fileQueue chan FileInfo // буферизированный канал с файлами для обработки
+	stopChan  chan struct{} // сигнал остановки
+	closed    bool          // флаг для защиты от повторного закрытия каналов
+	mu        sync.Mutex    // мьютекс для атомарного закрытия
 }
 
-// NewWatcher - создание нового watcher
+// NewWatcher создаёт новый экземпляр Watcher.
+// watchDir   – путь к директории для мониторинга.
+// interval   – периодичность сканирования.
+// queueSize  – размер буфера очереди файлов.
 func NewWatcher(watchDir string, interval time.Duration, queueSize int) *Watcher {
 	return &Watcher{
 		watchDir:  watchDir,
 		interval:  interval,
 		fileQueue: make(chan FileInfo, queueSize),
-		processed: make(map[string]bool),
 		stopChan:  make(chan struct{}),
 	}
 }
 
-// Start - запуск мониторинга
+// Start запускает цикл сканирования директории.
+// Запускается в отдельной горутине; работает до вызова Stop().
 func (w *Watcher) Start() {
-	log.Printf("Starting directory watcher for: %s (interval: %v)", w.watchDir, w.interval)
-
-	ticker := time.NewTicker(w.interval)
-	defer ticker.Stop()
+	log.Printf("[Watcher] Starting directory watcher for: %s (interval: %v)", w.watchDir, w.interval)
 
 	// Первоначальное сканирование
 	w.scanDirectory()
 
-	// Периодическое сканирование
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ticker.C:
 			w.scanDirectory()
 		case <-w.stopChan:
-			log.Println("Directory watcher stopped")
+			log.Println("[Watcher] Directory watcher stopped")
 			return
 		}
 	}
 }
 
-// Stop - остановка мониторинга
+// Stop останавливает Watcher и закрывает канал fileQueue.
+// Может быть вызвана многократно безопасно.
 func (w *Watcher) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return
+	}
 	close(w.stopChan)
+	close(w.fileQueue)
+	w.closed = true
+	log.Println("[Watcher] File queue closed")
 }
 
-// GetFileQueue - получение канала с файлами
+// GetFileQueue возвращает канал для чтения FileInfo.
+// Используется воркерами для получения файлов.
 func (w *Watcher) GetFileQueue() <-chan FileInfo {
 	return w.fileQueue
 }
 
-// scanDirectory - сканирование директории
+// SendToQueue позволяет внешним компонентам (например, API) вручную
+// поставить файл в очередь обработки. Блокируется до освобождения места
+// в канале, но не дольше timeout (5 секунд).
+func (w *Watcher) SendToQueue(fileInfo FileInfo) error {
+	select {
+	case w.fileQueue <- fileInfo:
+		log.Printf("[Watcher] Manually queued file: %s", fileInfo.Name)
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("queue is full, timeout after 5s")
+	}
+}
+
+// scanDirectory читает содержимое watchDir, отбирает .tsv файлы
+// и для каждого вызывает processFile.
 func (w *Watcher) scanDirectory() {
-	files, err := os.ReadDir(w.watchDir)
+	entries, err := os.ReadDir(w.watchDir)
 	if err != nil {
-		log.Printf("Error reading directory %s: %v", w.watchDir, err)
+		log.Printf("[Watcher] Error reading directory %s: %v", w.watchDir, err)
 		return
 	}
 
-	for _, file := range files {
-		// Пропускаем директории и скрытые файлы
-		if file.IsDir() || strings.HasPrefix(file.Name(), ".") {
+	for _, entry := range entries {
+		// Пропускаем поддиректории и скрытые файлы
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		// Интересуют только файлы с расширением .tsv
+		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".tsv") {
 			continue
 		}
 
-		// Проверяем расширение .tsv
-		if !strings.HasSuffix(strings.ToLower(file.Name()), ".tsv") {
-			continue
-		}
-
-		filePath := filepath.Join(w.watchDir, file.Name())
+		filePath := filepath.Join(w.watchDir, entry.Name())
 		w.processFile(filePath)
 	}
 }
 
-// processFile - обработка файла
+// processFile собирает информацию о файле, вычисляет хеш и
+// отправляет его в очередь (с таймаутом).
 func (w *Watcher) processFile(filePath string) {
-	// Получаем информацию о файле
 	info, err := os.Stat(filePath)
 	if err != nil {
-		log.Printf("Error getting file info %s: %v", filePath, err)
+		log.Printf("[Watcher] Error stating file %s: %v", filePath, err)
 		return
 	}
 
-	// Вычисляем хэш файла (для предотвращения повторной обработки)
+	// Вычисляем SHA256 хеш содержимого файла
 	hash, err := w.calculateFileHash(filePath)
 	if err != nil {
-		log.Printf("Error calculating hash for %s: %v", filePath, err)
+		log.Printf("[Watcher] Error calculating hash for %s: %v", filePath, err)
 		return
 	}
 
-	// Проверяем, не обрабатывался ли уже этот файл
-	if w.isProcessed(hash) {
-		log.Printf("File already processed: %s (hash: %s)", filePath, hash[:8])
-		return
-	}
-
-	// Создаем FileInfo
 	fileInfo := FileInfo{
 		Path:    filePath,
 		Name:    info.Name(),
@@ -131,59 +150,28 @@ func (w *Watcher) processFile(filePath string) {
 		Hash:    hash,
 	}
 
-	// Добавляем в очередь (неблокирующая попытка)
+	// Отправляем в очередь с таймаутом 5 секунд.
+	// Если очередь заполнена, ждём; если таймаут истёк – логируем ошибку.
 	select {
 	case w.fileQueue <- fileInfo:
-		w.markAsProcessed(hash)
-		log.Printf("Queued file for processing: %s (size: %d bytes)", filePath, info.Size())
-	default:
-		log.Printf("Queue is full, skipping file: %s", filePath)
+		log.Printf("[Watcher] Queued file: %s (size: %d bytes, hash: %s)",
+			fileInfo.Name, fileInfo.Size, fileInfo.Hash[:8])
+	case <-time.After(5 * time.Second):
+		log.Printf("[Watcher] Queue is full, cannot queue file: %s", fileInfo.Name)
 	}
 }
 
-// calculateFileHash - вычисление хэша файла
+// calculateFileHash вычисляет SHA256 хеш содержимого файла.
 func (w *Watcher) calculateFileHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+	f, err := os.Open(filePath)
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer f.Close()
 
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	if _, err := io.Copy(hash, f); err != nil {
 		return "", err
 	}
-
 	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-// isProcessed - проверка, обработан ли файл
-func (w *Watcher) isProcessed(hash string) bool {
-	w.mu.RLock()
-	defer w.mu.RUnlock()
-	return w.processed[hash]
-}
-
-// markAsProcessed - пометить файл как обработанный
-func (w *Watcher) markAsProcessed(hash string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.processed[hash] = true
-}
-
-// ClearProcessed - очистка списка обработанных файлов (для тестирования)
-func (w *Watcher) ClearProcessed() {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.processed = make(map[string]bool)
-}
-
-func (w *Watcher) SendToQueue(fileInfo FileInfo) error {
-	select {
-	case w.fileQueue <- fileInfo:
-		w.markAsProcessed(fileInfo.Hash)
-		return nil
-	default:
-		return fmt.Errorf("queue is full")
-	}
 }

@@ -12,6 +12,7 @@ directory:
   watch_path: "./incoming"
   output_path: "./reports"
   archive_path: "./archive"
+  error_path: "./errors"
   temp_path: "./tmp"
 
 server:
