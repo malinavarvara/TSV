@@ -1,4 +1,4 @@
-#﻿ TSV Processing Service
+# TSV Processing Service
 Сервис на Go для автоматической обработки TSV-файлов, сохранения данных в PostgreSQL, генерации отчётов и REST API.
 
 ## Основные возможности
@@ -52,4 +52,5 @@ curl -s -X POST "http://localhost:8080/api/v1/files/device_test.tsv/process"
 
 # Build & run everything (postgres + приложение + автоматический прогон go test)
 docker compose up --build
+
 
