@@ -40,4 +40,4 @@ WHERE id = $1;
 
 -- name: DeleteOldReports :exec
 DELETE FROM reports
-WHERE generated_at < now() - interval '365 days';
+WHERE generated_at < CURRENT_TIMESTAMP - interval '365 days';

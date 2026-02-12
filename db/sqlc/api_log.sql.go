@@ -14,7 +14,7 @@ import (
 
 const cleanupOldApiLogs = `-- name: CleanupOldApiLogs :exec
 DELETE FROM api_logs
-WHERE created_at < now() - interval '30 days'
+WHERE created_at < CURRENT_TIMESTAMP - interval '30 days'
 `
 
 func (q *Queries) CleanupOldApiLogs(ctx context.Context) error {
@@ -95,7 +95,7 @@ SELECT
     AVG(response_time_ms)::int as avg_response_time,
     COUNT(CASE WHEN status_code >= 400 THEN 1 END) as error_count
 FROM api_logs
-WHERE created_at >= now() - interval '1 day'
+WHERE created_at >= CURRENT_TIMESTAMP - interval '1 day'
 GROUP BY endpoint
 ORDER BY request_count DESC
 `

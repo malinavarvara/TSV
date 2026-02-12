@@ -43,7 +43,7 @@ func (q *Queries) CreateReport(ctx context.Context, arg CreateReportParams) (Rep
 
 const deleteOldReports = `-- name: DeleteOldReports :exec
 DELETE FROM reports
-WHERE generated_at < now() - interval '365 days'
+WHERE generated_at < CURRENT_TIMESTAMP - interval '365 days'
 `
 
 func (q *Queries) DeleteOldReports(ctx context.Context) error {

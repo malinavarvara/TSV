@@ -73,12 +73,7 @@ func NewProcessor(db *sql.DB, queries *sqlc.Queries, config *config.DirectoryCon
 func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) error {
 	log.Printf("[Processor] 🔄 Processing file: %s", fileInfo.Name)
 
-	// 1. Проверка, не занят ли файл другим процессом
-	if err := p.waitForFileReady(fileInfo.Path, 10*time.Second); err != nil {
-		return fmt.Errorf("file not ready: %w", err)
-	}
-
-	// 2. Проверка, не был ли этот файл уже обработан
+	// 1. СНАЧАЛА проверяем, не был ли этот файл уже обработан
 	existingFile, err := p.queries.GetFileByFilename(ctx, fileInfo.Name)
 	if err == nil {
 		log.Printf("[Processor] File %s already processed (status: %s)", fileInfo.Name, existingFile.Status.String)
@@ -87,6 +82,11 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("failed to check existing file: %w", err)
+	}
+
+	// 2. ТОЛЬКО ТЕПЕРЬ проверяем, готов ли файл к чтению
+	if err := p.waitForFileReady(fileInfo.Path, 10*time.Second); err != nil {
+		return fmt.Errorf("file not ready: %w", err)
 	}
 
 	// 3. Транзакционная обработка файла
@@ -170,7 +170,7 @@ func (p *Processor) ProcessFile(ctx context.Context, fileInfo watcher.FileInfo) 
 
 	// 9. Определение финального статуса
 	status := "completed"
-	if failedCount > 0 && failedCount == int32(len(rows)) {
+	if successCount == 0 {
 		status = "failed"
 	} else if failedCount > 0 {
 		status = "partial"
@@ -692,6 +692,11 @@ func (p *Processor) copyFile(src, dst string) error {
 
 // moveExistingFile перемещает уже обработанный файл в соответствующую папку.
 func (p *Processor) moveExistingFile(filePath, status string) {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Printf("[Processor] File %s already moved or deleted, skipping", filePath)
+		return
+	}
+
 	switch status {
 	case "completed", "partial":
 		if err := p.moveFile(filePath, p.config.ArchivePath, filepath.Base(filePath)); err != nil {

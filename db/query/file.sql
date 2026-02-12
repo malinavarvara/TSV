@@ -35,7 +35,7 @@ ORDER BY created_at DESC;
 UPDATE files
 SET
     status = $2,
-    updated_at = now()
+    updated_at = CURRENT_TIMESTAMP
 WHERE id = $1
 RETURNING *;
 
@@ -44,7 +44,7 @@ UPDATE files
 SET
     rows_processed = $2,
     rows_failed = $3,
-    updated_at = now()
+    updated_at = CURRENT_TIMESTAMP
 WHERE id = $1
 RETURNING *;
 
@@ -53,7 +53,7 @@ UPDATE files
 SET
     status = $2,
     error_message = $3,
-    updated_at = now()
+    updated_at = CURRENT_TIMESTAMP
 WHERE id = $1
 RETURNING *;
 
@@ -63,5 +63,5 @@ WHERE id = $1;
 
 -- name: DeleteOldFiles :exec
 DELETE FROM files
-WHERE created_at < now() - interval '30 days'
+WHERE created_at < CURRENT_TIMESTAMP - interval '30 days'
 AND status = $1;
